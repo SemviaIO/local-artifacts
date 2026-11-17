@@ -319,7 +319,7 @@ describe("short links", () => {
     origin = `http://127.0.0.1:${port}`;
 
     // Minted after the app is ready, as `preview` does at run time.
-    id = await table.mint(site);
+    id = path.posix.basename((await table.mint(site)).prefix);
   });
 
   afterAll(async () => {

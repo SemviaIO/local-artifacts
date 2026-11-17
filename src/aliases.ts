@@ -1,19 +1,17 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { ALIAS_NAMESPACE } from "./config.js";
 import { resolvePathToSource, resolveSafePath } from "./fs.js";
 import type { SourceConfig } from "./types.js";
-
-/** URL segment that holds every short link: `/s/<id>/<rest>`. */
-export const ALIAS_NAMESPACE = "s";
 
 /** Crockford base32, lowercase: no `i`, `l`, `o` or `u`. */
 const CROCKFORD = "0123456789abcdefghjkmnpqrstvwxyz";
 
 const MIN_ID_LENGTH = 8;
 
-const VALID_ID = /^[0-9a-hjkmnp-tv-z]{8,}$/;
+const VALID_ID = new RegExp(`^[${CROCKFORD}]{${MIN_ID_LENGTH},}$`);
 
 /** The slice of the table the HTTP routes read. */
 export interface AliasResolver {
@@ -22,7 +20,7 @@ export interface AliasResolver {
 
 /** The slice of the table `preview` writes. */
 export interface AliasMinter {
-  mint(directory: string): Promise<string>;
+  mint(directory: string): Promise<SourceConfig>;
 }
 
 function base32(bytes: Buffer): string {
@@ -93,18 +91,16 @@ export class AliasTable implements AliasResolver, AliasMinter {
 
   resolve(id: string): SourceConfig | undefined {
     const root = this.byId.get(id);
-    return root === undefined
-      ? undefined
-      : { prefix: `${ALIAS_NAMESPACE}/${id}`, root };
+    return root === undefined ? undefined : aliasSource(id, root);
   }
 
   /**
-   * The id for `directory`, minting and persisting one if it has none. The
-   * id is the shortest prefix of the path's hash, eight characters or more,
-   * that no other directory holds. Throws when the directory may not hold an
-   * alias or the table cannot be written.
+   * The short-link source for `directory`, minting and persisting an id if it
+   * has none. The id is the shortest prefix of the path's hash, eight
+   * characters or more, that no other directory holds. Throws when the
+   * directory may not hold an alias or the table cannot be written.
    */
-  async mint(directory: string): Promise<string> {
+  async mint(directory: string): Promise<SourceConfig> {
     const lexical = path.resolve(directory);
     if (!(await this.admits(lexical))) {
       throw new Error(
@@ -122,7 +118,7 @@ export class AliasTable implements AliasResolver, AliasMinter {
       if (this.byDirectory.get(lexical) !== existing) {
         throw new Error(`Could not save the short link for "${directory}"`);
       }
-      return existing;
+      return aliasSource(existing, lexical);
     }
 
     const candidates = fullId(lexical);
@@ -139,7 +135,7 @@ export class AliasTable implements AliasResolver, AliasMinter {
       this.byId.delete(id);
       this.byDirectory.delete(lexical);
     });
-    return id;
+    return aliasSource(id, lexical);
   }
 
   private add(id: string, directory: string) {
@@ -168,18 +164,24 @@ export class AliasTable implements AliasResolver, AliasMinter {
    * reader never sees half a file. Each write snapshots the table when its
    * turn comes, so the last write always holds every entry. `rollback` runs
    * on failure before the next write starts, so the table in memory never
-   * holds an entry its own mint reported as failed.
+   * holds an entry its own mint reported as failed. The file is readable by
+   * its owner only, since it names every previewed directory.
    */
   private persist(rollback: () => void): Promise<void> {
     const write = this.writing.then(async () => {
       const temp = `${this.file}.${process.pid}.${++this.writeCount}.tmp`;
-      await mkdir(path.dirname(this.file), { recursive: true });
-      await writeFile(
-        temp,
-        JSON.stringify(Object.fromEntries(this.byId), null, 2) + "\n",
-        "utf-8",
-      );
-      await rename(temp, this.file);
+      try {
+        await mkdir(path.dirname(this.file), { recursive: true });
+        await writeFile(
+          temp,
+          JSON.stringify(Object.fromEntries(this.byId), null, 2) + "\n",
+          { encoding: "utf-8", mode: 0o600 },
+        );
+        await rename(temp, this.file);
+      } catch (error: unknown) {
+        await rm(temp, { force: true }).catch(() => {});
+        throw error;
+      }
     }).catch((error: unknown) => {
       rollback();
       throw error;
@@ -188,6 +190,11 @@ export class AliasTable implements AliasResolver, AliasMinter {
     this.writing = write.catch(() => {});
     return write;
   }
+}
+
+/** The source a short link serves: `/s/<id>/<rest>` reads `<root>/<rest>`. */
+function aliasSource(id: string, root: string): SourceConfig {
+  return { prefix: `${ALIAS_NAMESPACE}/${id}`, root };
 }
 
 async function readTable(file: string): Promise<Record<string, unknown>> {

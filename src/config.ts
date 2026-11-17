@@ -4,7 +4,6 @@ import node_os from "node:os";
 import node_path from "node:path";
 import node_util from "node:util";
 
-import { ALIAS_NAMESPACE } from "./aliases.js";
 import type { Config, SourceConfig } from "./types.js";
 
 const VALID_PREFIX = /^[a-z0-9-]+(\/[a-z0-9-]+)*$/;
@@ -35,6 +34,9 @@ export const CLAUDE_SESSIONS_ROOT = node_path.join(
 );
 
 export const CLAUDE_SESSIONS_PREFIX = "claude-sessions";
+
+/** URL segment that holds every short link: `/s/<id>/<rest>`. */
+export const ALIAS_NAMESPACE = "s";
 
 /**
  * Always served, whatever the config file says: a config that sets

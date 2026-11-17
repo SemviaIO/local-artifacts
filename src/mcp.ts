@@ -6,8 +6,8 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { ALIAS_NAMESPACE, type AliasMinter } from "./aliases.js";
-import type { Config } from "./types.js";
+import type { AliasMinter } from "./aliases.js";
+import type { Config, SourceConfig } from "./types.js";
 import { CLAUDE_SESSIONS_PREFIX } from "./config.js";
 import {
   isServedFile,
@@ -189,16 +189,16 @@ export function createMcpServer(
         // The short link names the file's directory, so every file in one
         // directory shares an id. Minted only here, once the file has passed
         // validation.
-        let id: string;
+        let short: SourceConfig;
         try {
-          id = await aliases.mint(path.dirname(path.resolve(filePath)));
+          short = await aliases.mint(path.dirname(path.resolve(filePath)));
         } catch (e) {
           return {
             content: [{ type: "text", text: `Could not create a short link: ${(e as Error).message}` }],
             isError: true,
           };
         }
-        const url = `${viewerUrl()}/${ALIAS_NAMESPACE}/${id}/${path.basename(viewName)}`;
+        const url = `${viewerUrl()}/${short.prefix}/${path.basename(viewName)}`;
 
         // One success shape for both formats, so callers parse one thing.
         return {

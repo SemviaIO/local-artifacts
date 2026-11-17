@@ -4,7 +4,8 @@ import { stat } from "node:fs/promises";
 
 import Fastify, { type FastifyInstance } from "fastify";
 
-import { ALIAS_NAMESPACE, type AliasResolver } from "./aliases.js";
+import type { AliasResolver } from "./aliases.js";
+import { ALIAS_NAMESPACE } from "./config.js";
 import type { Config, SourceRoute } from "./types.js";
 import {
   assetContentType,

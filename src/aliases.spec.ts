@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -18,6 +18,10 @@ describe("AliasTable", () => {
 
   /** A fresh table file path; nothing is written until the first mint. */
   const tableFile = () => path.join(parent, "tables", `${++tables}.json`);
+
+  /** Mint `directory` and return the id its short-link prefix carries. */
+  const mintId = async (table: AliasTable, directory: string) =>
+    path.posix.basename((await table.mint(directory)).prefix);
 
   const readEntries = async (file: string) =>
     JSON.parse(await readFile(file, "utf-8")) as Record<string, string>;
@@ -42,8 +46,8 @@ describe("AliasTable", () => {
   it("gives one directory the same eight-character id on each mint", async () => {
     const table = await AliasTable.load(tableFile(), sources);
 
-    const first = await table.mint(path.join(root, "a"));
-    const second = await table.mint(path.join(root, "a"));
+    const first = await mintId(table, path.join(root, "a"));
+    const second = await mintId(table, path.join(root, "a"));
 
     expect(first).toMatch(ID_SHAPE);
     expect(second).toBe(first);
@@ -53,14 +57,14 @@ describe("AliasTable", () => {
     const one = await AliasTable.load(tableFile(), sources);
     const two = await AliasTable.load(tableFile(), sources);
 
-    expect(await one.mint(path.join(root, "a"))).toBe(
-      await two.mint(path.join(root, "a")),
+    expect(await mintId(one, path.join(root, "a"))).toBe(
+      await mintId(two, path.join(root, "a")),
     );
   });
 
   it("resolves an id to a source jailed at its directory", async () => {
     const table = await AliasTable.load(tableFile(), sources);
-    const id = await table.mint(path.join(root, "a"));
+    const id = await mintId(table, path.join(root, "a"));
 
     expect(table.resolve(id)).toEqual({ prefix: `s/${id}`, root: path.join(root, "a") });
     expect(table.resolve("zzzzzzzz")).toBeUndefined();
@@ -69,12 +73,12 @@ describe("AliasTable", () => {
   it("admits a source root", async () => {
     const table = await AliasTable.load(tableFile(), sources);
 
-    expect(await table.mint(root)).toMatch(ID_SHAPE);
+    expect(await mintId(table, root)).toMatch(ID_SHAPE);
   });
 
   it("grows the later id by one character when two directories collide", async () => {
     const probe = await AliasTable.load(tableFile(), sources);
-    const idOfB = await probe.mint(path.join(root, "b"));
+    const idOfB = await mintId(probe, path.join(root, "b"));
 
     // Seed the table so directory A already holds B's eight-character id.
     const file = tableFile();
@@ -82,7 +86,7 @@ describe("AliasTable", () => {
     await writeFile(file, JSON.stringify({ [idOfB]: path.join(root, "a") }));
     const table = await AliasTable.load(file, sources);
 
-    const grown = await table.mint(path.join(root, "b"));
+    const grown = await mintId(table, path.join(root, "b"));
 
     expect(grown).toHaveLength(9);
     expect(grown.startsWith(idOfB)).toBe(true);
@@ -93,7 +97,7 @@ describe("AliasTable", () => {
   it("keeps a minted id across a restart", async () => {
     const file = tableFile();
     const before = await AliasTable.load(file, sources);
-    const id = await before.mint(path.join(root, "a"));
+    const id = await mintId(before, path.join(root, "a"));
 
     const after = await AliasTable.load(file, sources);
 
@@ -105,8 +109,8 @@ describe("AliasTable", () => {
     const gone = path.join(root, "gone");
     await mkdir(gone);
     const before = await AliasTable.load(file, sources);
-    const kept = await before.mint(path.join(root, "c"));
-    const dropped = await before.mint(gone);
+    const kept = await mintId(before, path.join(root, "c"));
+    const dropped = await mintId(before, gone);
     await rm(gone, { recursive: true });
     const entries = await readEntries(file);
     entries["0000000000"] = outside;
@@ -144,7 +148,7 @@ describe("AliasTable", () => {
     const table = await AliasTable.load(file, sources);
 
     const ids = await Promise.all(
-      ["a", "b", "c", "d"].map((dir) => table.mint(path.join(root, dir))),
+      ["a", "b", "c", "d"].map((dir) => mintId(table, path.join(root, dir))),
     );
 
     expect(Object.keys(await readEntries(file)).sort()).toEqual([...ids].sort());
@@ -165,6 +169,37 @@ describe("AliasTable", () => {
     await expect(table.mint(path.join(root, "a"))).rejects.toThrow();
   });
 
+  it("returns the short-link source for the directory", async () => {
+    const table = await AliasTable.load(tableFile(), sources);
+
+    const source = await table.mint(path.join(root, "a"));
+
+    expect(source.prefix).toMatch(/^s\/[0-9a-hjkmnp-tv-z]{8}$/);
+    expect(table.resolve(path.posix.basename(source.prefix))).toEqual(source);
+  });
+
+  it("writes the table readable by its owner only", async () => {
+    const file = tableFile();
+    const table = await AliasTable.load(file, sources);
+
+    await table.mint(path.join(root, "a"));
+
+    expect((await stat(file)).mode & 0o777).toBe(0o600);
+  });
+
+  it("removes its temp file when a write fails", async () => {
+    const dir = path.join(parent, "temp-cleanup");
+    const file = path.join(dir, "table.json");
+    const table = await AliasTable.load(file, sources);
+    // A non-empty directory at the table's path makes the rename fail after
+    // the temp file is written.
+    await mkdir(path.join(file, "occupied"), { recursive: true });
+
+    await expect(table.mint(path.join(root, "a"))).rejects.toThrow();
+
+    expect(await readdir(dir)).toEqual(["table.json"]);
+  });
+
   it("refuses to load a table file it cannot read", async () => {
     const unreadable = path.join(parent, "a-directory");
     await mkdir(unreadable);
@@ -179,6 +214,6 @@ describe("AliasTable", () => {
 
     const table = await AliasTable.load(file, sources);
 
-    expect(await table.mint(path.join(root, "a"))).toMatch(ID_SHAPE);
+    expect(await mintId(table, path.join(root, "a"))).toMatch(ID_SHAPE);
   });
 });
