@@ -4,14 +4,19 @@ import { stat } from "node:fs/promises";
 
 import Fastify, { type FastifyInstance } from "fastify";
 
-import type { Config } from "./types.js";
+import { ALIAS_NAMESPACE, type AliasResolver } from "./aliases.js";
+import type { Config, SourceRoute } from "./types.js";
 import {
   assetContentType,
   readSourceBytes,
   readSourceFile,
   resolveSafePath,
 } from "./fs.js";
-import { isNotFound, sendFsError } from "./routes/errors.js";
+import {
+  isNotFound,
+  sendFsError,
+  sendUnknownSource,
+} from "./routes/errors.js";
 import { registerApiRoutes } from "./routes/api.js";
 import { registerWatchRoutes } from "./routes/watch.js";
 import { hostHtml } from "./templates/html-host.js";
@@ -66,7 +71,10 @@ declare module "fastify" {
   }
 }
 
-export function createApp(config: Config): FastifyInstance {
+export function createApp(
+  config: Config,
+  aliases: AliasResolver,
+): FastifyInstance {
   const app = Fastify();
 
   // Hidden sources are served but not listed on the root index.
@@ -101,10 +109,25 @@ export function createApp(config: Config): FastifyInstance {
     );
   });
 
-  // API and SSE routes (hidden sources still get routes — `hidden` only
-  // controls discovery, not reachability)
-  registerApiRoutes(app, config.sources);
-  registerWatchRoutes(app, config.sources);
+  // A source prefix may contain "/" (e.g. "claude/plans"), so each configured
+  // source gets explicit routes rather than a /:source param, which would
+  // only match a single path segment. Short links share one parametric
+  // route. Hidden sources still get routes — `hidden` only controls
+  // discovery, not reachability.
+  const routes: SourceRoute[] = [
+    ...config.sources.map((source) => ({
+      pattern: `/${source.prefix}`,
+      lookup: () => source,
+    })),
+    {
+      pattern: `/${ALIAS_NAMESPACE}/:id`,
+      lookup: (params: Record<string, string>) => aliases.resolve(params.id),
+    },
+  ];
+
+  registerApiRoutes(app, routes);
+  registerWatchRoutes(app, routes);
+  registerPageRoutes(app, routes);
 
   // Root index
   app.get("/", async (request, reply) => {
@@ -115,25 +138,35 @@ export function createApp(config: Config): FastifyInstance {
     });
   });
 
-  // Per-source HTML routes. A source prefix may contain "/" (e.g. "claude/plans"),
-  // so we register explicit routes per source rather than using a /:source param,
-  // which would only match a single path segment.
-  //
-  // The narrow `${urlPrefix}/` route is registered before the wildcard so
+  return app;
+}
+
+/**
+ * Viewer routes for each source route: listings, hosted `.html` pages and
+ * their sibling assets, and the Markdown viewer shell.
+ */
+function registerPageRoutes(app: FastifyInstance, routes: SourceRoute[]) {
+  // The narrow `${pattern}/` route is registered before the wildcard so
   // Fastify's route specificity wins for the source-root listing.
-  for (const source of config.sources) {
-    const urlPrefix = `/${source.prefix}`;
-
-    app.get(`${urlPrefix}/`, async (request, reply) => {
-      void reply.type("text/html");
-      return renderListingPage(source.prefix, request.nonce, {
-        kind: "sourceRoot",
-      });
-    });
-
-    app.get<{ Params: { "*": string } }>(
-      `${urlPrefix}/*`,
+  for (const route of routes) {
+    app.get<{ Params: Record<string, string> }>(
+      `${route.pattern}/`,
       async (request, reply) => {
+        const source = route.lookup(request.params);
+        if (source === undefined) return sendUnknownSource(reply);
+        void reply.type("text/html");
+        return renderListingPage(source.prefix, request.nonce, {
+          kind: "sourceRoot",
+        });
+      },
+    );
+
+    app.get<{ Params: Record<string, string> }>(
+      `${route.pattern}/*`,
+      async (request, reply) => {
+        const source = route.lookup(request.params);
+        if (source === undefined) return sendUnknownSource(reply);
+        const urlPrefix = `/${source.prefix}`;
         const captured = request.params["*"];
 
         // Trailing slash → directory listing for a sub-path.
@@ -227,6 +260,4 @@ export function createApp(config: Config): FastifyInstance {
       },
     );
   }
-
-  return app;
 }

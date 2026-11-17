@@ -1,17 +1,19 @@
 import type { FastifyInstance } from "fastify";
 
 import { readSourceFile, watchFile, watchPageDirectory } from "../fs.js";
-import type { SourceConfig } from "../types.js";
-import { sendFsError } from "./errors.js";
+import type { SourceRoute } from "../types.js";
+import { sendFsError, sendUnknownSource } from "./errors.js";
 
 export function registerWatchRoutes(
   app: FastifyInstance,
-  sources: SourceConfig[],
+  routes: SourceRoute[],
 ): void {
-  for (const source of sources) {
-    app.get<{ Params: { "*": string } }>(
-      `/events/${source.prefix}/*`,
+  for (const route of routes) {
+    app.get<{ Params: Record<string, string> }>(
+      `/events${route.pattern}/*`,
       async (request, reply) => {
+        const source = route.lookup(request.params);
+        if (source === undefined) return sendUnknownSource(reply);
         const filename = request.params["*"];
 
         const isPage = filename.endsWith(".html");

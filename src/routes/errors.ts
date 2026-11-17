@@ -36,3 +36,8 @@ export function sendFsError(
   }
   return reply.status(500).send({ error: "Internal server error" });
 }
+
+/** 404 for a short-link id the table does not hold. */
+export function sendUnknownSource(reply: FastifyReply) {
+  return reply.status(404).send({ error: "Unknown short link" });
+}

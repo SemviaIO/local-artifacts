@@ -4,6 +4,7 @@ import node_os from "node:os";
 import node_path from "node:path";
 import node_util from "node:util";
 
+import { ALIAS_NAMESPACE } from "./aliases.js";
 import type { Config, SourceConfig } from "./types.js";
 
 const VALID_PREFIX = /^[a-z0-9-]+(\/[a-z0-9-]+)*$/;
@@ -78,10 +79,12 @@ function validatePrefix(prefix: string) {
   }
 }
 
-function validateSourceSet(prefixes: string[]) {
+function validateSourceSet(sourcePrefixes: string[]) {
   // Reject overlapping prefixes — one cannot be a path-prefix of another.
   // e.g. "plans" + "plans/foo" would produce Fastify route collisions between
   // "/plans/:file" (file under outer) and "/plans/foo/" (listing for inner).
+  // The short-link namespace takes part, so no source can claim it.
+  const prefixes = [...sourcePrefixes, ALIAS_NAMESPACE];
   for (let i = 0; i < prefixes.length; i++) {
     for (let j = i + 1; j < prefixes.length; j++) {
       const [a, b] = [prefixes[i], prefixes[j]];

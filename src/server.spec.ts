@@ -7,6 +7,7 @@ import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { AliasTable, type AliasResolver } from "./aliases.js";
 import { createApp } from "./server.js";
 import { RELOAD_SCRIPT } from "./templates/html-host.js";
 import type { Config } from "./types.js";
@@ -24,6 +25,8 @@ const PNG_FIXTURE = Buffer.from(
   "base64",
 );
 
+const NO_ALIASES: AliasResolver = { resolve: () => undefined };
+
 function configFor(root: string): Config {
   return {
     sources: [{ prefix: "plans", root }],
@@ -31,6 +34,28 @@ function configFor(root: string): Config {
     host: "127.0.0.1",
     tailscale: false,
   };
+}
+
+/**
+ * Open an SSE stream and resolve with its first chunk. The stream sends
+ * nothing, headers included, until the first event, so callers keep editing
+ * the watched file until one lands.
+ */
+function firstEvent(url: string): Promise<{ status: number; type: string; data: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, (res) => {
+      res.setEncoding("utf-8");
+      res.once("data", (chunk: string) => {
+        req.destroy();
+        resolve({
+          status: res.statusCode ?? 0,
+          type: String(res.headers["content-type"]),
+          data: chunk,
+        });
+      });
+    });
+    req.on("error", reject);
+  });
 }
 
 describe("hosted .html route", () => {
@@ -47,7 +72,7 @@ describe("hosted .html route", () => {
       "utf-8",
     );
 
-    app = createApp(configFor(sourceRoot));
+    app = createApp(configFor(sourceRoot), NO_ALIASES);
     await app.ready();
   });
 
@@ -129,7 +154,7 @@ describe("sibling assets", () => {
     await writeFile(path.join(parent, "secret.png"), PNG_FIXTURE);
     await symlink(path.join(parent, "secret.png"), path.join(sourceRoot, "escape.png"));
 
-    app = createApp(configFor(sourceRoot));
+    app = createApp(configFor(sourceRoot), NO_ALIASES);
     await app.ready();
   });
 
@@ -222,7 +247,7 @@ describe("live reload for hosted HTML", () => {
     await writeFile(path.join(sourceRoot, "index.html"), FRAGMENT_FIXTURE);
     await writeFile(path.join(sourceRoot, "assets", "style.css"), "h1 {}\n");
 
-    app = createApp(configFor(sourceRoot));
+    app = createApp(configFor(sourceRoot), NO_ALIASES);
     await app.listen({ port: 0, host: "127.0.0.1" });
     const { port } = app.server.address() as AddressInfo;
     origin = `http://127.0.0.1:${port}`;
@@ -251,24 +276,7 @@ describe("live reload for hosted HTML", () => {
     }, 250);
 
     try {
-      const { status, type, data } = await new Promise<{
-        status: number;
-        type: string;
-        data: string;
-      }>((resolve, reject) => {
-        const req = http.get(`${origin}/events/plans/index.html`, (res) => {
-          res.setEncoding("utf-8");
-          res.once("data", (chunk: string) => {
-            req.destroy();
-            resolve({
-              status: res.statusCode ?? 0,
-              type: String(res.headers["content-type"]),
-              data: chunk,
-            });
-          });
-        });
-        req.on("error", reject);
-      });
+      const { status, type, data } = await firstEvent(`${origin}/events/plans/index.html`);
 
       expect(status).toBe(200);
       expect(type).toBe("text/event-stream");
@@ -277,6 +285,137 @@ describe("live reload for hosted HTML", () => {
       clearInterval(touch);
     }
   });
+});
+
+describe("short links", () => {
+  let parent: string;
+  let sourceRoot: string;
+  let site: string;
+  let app: FastifyInstance;
+  let origin: string;
+  let id: string;
+
+  const get = (url: string) => app.inject({ method: "GET", url });
+
+  beforeAll(async () => {
+    parent = await mkdtemp(path.join(os.tmpdir(), "local-artifacts-short-"));
+    sourceRoot = path.join(parent, "root");
+    site = path.join(sourceRoot, "site");
+    await mkdir(path.join(site, "assets"), { recursive: true });
+    await writeFile(path.join(site, "page.html"), HTML_FIXTURE);
+    await writeFile(path.join(site, "index.html"), FRAGMENT_FIXTURE);
+    await writeFile(path.join(site, "assets", "style.css"), "h1 {}\n");
+    await writeFile(path.join(site, "logo.png"), PNG_FIXTURE);
+    await writeFile(path.join(site, "doc.md"), "# Doc\n");
+    // Inside the source, above the aliased directory.
+    await writeFile(path.join(sourceRoot, "secret.png"), PNG_FIXTURE);
+    await writeFile(path.join(sourceRoot, "secret.md"), "secret\n");
+
+    const config = configFor(sourceRoot);
+    const table = await AliasTable.load(path.join(parent, "short-links.json"), config.sources);
+    app = createApp(config, table);
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const { port } = app.server.address() as AddressInfo;
+    origin = `http://127.0.0.1:${port}`;
+
+    // Minted after the app is ready, as `preview` does at run time.
+    id = await table.mint(site);
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await rm(parent, { recursive: true, force: true });
+  });
+
+  it("serves a hosted page as its full path does", async () => {
+    const short = await get(`/s/${id}/page.html`);
+    const full = await get("/plans/site/page.html");
+
+    expect(short.statusCode).toBe(200);
+    expect(short.headers["content-type"]).toBe("text/html; charset=utf-8");
+    expect(short.body).toBe(full.body);
+  });
+
+  it("serves sibling assets with their types", async () => {
+    const css = await get(`/s/${id}/assets/style.css`);
+    const png = await get(`/s/${id}/logo.png`);
+
+    expect(css.headers["content-type"]).toBe("text/css; charset=utf-8");
+    expect(png.headers["content-type"]).toBe("image/png");
+    expect(png.rawPayload.equals(PNG_FIXTURE)).toBe(true);
+  });
+
+  it("serves the Markdown viewer shell and the raw Markdown", async () => {
+    const shell = await get(`/s/${id}/doc`);
+    const raw = await get(`/api/s/${id}/doc.md`);
+
+    expect(shell.statusCode).toBe(200);
+    expect(shell.body).toContain(`/api/s/${id}/doc.md`);
+    expect(raw.headers["content-type"]).toBe("text/markdown; charset=utf-8");
+    expect(raw.body).toBe("# Doc\n");
+  });
+
+  it("lists the aliased directory under the short prefix", async () => {
+    const page = await get(`/s/${id}/`);
+    const listing = await get(`/api/s/${id}/`);
+    const paths = (listing.json() as { path: string }[]).map((e) => e.path);
+
+    expect(page.statusCode).toBe(200);
+    expect(paths.sort()).toEqual(
+      [`/s/${id}/assets`, `/s/${id}/doc.md`, `/s/${id}/index.html`, `/s/${id}/page.html`].sort(),
+    );
+  });
+
+  it("emits `changed` for a page when an asset beside it is edited", async () => {
+    const touch = setInterval(() => {
+      void writeFile(path.join(site, "assets", "style.css"), "h1 { color: red }\n");
+    }, 250);
+    try {
+      const { status, data } = await firstEvent(`${origin}/events/s/${id}/index.html`);
+
+      expect(status).toBe(200);
+      expect(data).toBe("data: changed\n\n");
+    } finally {
+      clearInterval(touch);
+    }
+  });
+
+  it("emits `changed` for a Markdown file when it is edited", async () => {
+    const touch = setInterval(() => {
+      void writeFile(path.join(site, "doc.md"), "# Doc, edited\n");
+    }, 250);
+    try {
+      const { status, data } = await firstEvent(`${origin}/events/s/${id}/doc.md`);
+
+      expect(status).toBe(200);
+      expect(data).toBe("data: changed\n\n");
+    } finally {
+      clearInterval(touch);
+    }
+  });
+
+  it.each([
+    "/s/zzzzzzzz/",
+    "/s/zzzzzzzz/page.html",
+    "/api/s/zzzzzzzz/",
+    "/api/s/zzzzzzzz/page.html",
+    "/events/s/zzzzzzzz/page.html",
+  ])("answers 404 for an unknown id at %s", async (url) => {
+    const response = await get(url);
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "Unknown short link" });
+  });
+
+  it.each(["/s/:id/..%2Fsecret.png", "/api/s/:id/..%2Fsecret.md", "/events/s/:id/..%2Fsecret.md"])(
+    "cannot read above the aliased directory at %s",
+    async (url) => {
+      const response = await get(url.replace(":id", id));
+
+      expect(response.statusCode).toBe(403);
+      expect(response.body).not.toContain("secret");
+    },
+  );
 });
 
 describe("host guard", () => {
@@ -291,7 +430,7 @@ describe("host guard", () => {
     await writeFile(path.join(sourceRoot, "secret.md"), SECRET, "utf-8");
 
     config = configFor(sourceRoot);
-    app = createApp(config);
+    app = createApp(config, NO_ALIASES);
     // Registered after createApp returns, standing in for main.ts's /mcp.
     app.get("/late", async () => "late route");
     app.post("/late", async () => "late route");
@@ -377,7 +516,7 @@ describe("host guard with a non-loopback bind host", () => {
     ["::1", "[::1]:3333"],
   ])("serves the configured host %s", async (bindHost, hostHeader) => {
     const sourceRoot = await mkdtemp(path.join(os.tmpdir(), "agent-md-server-bind-"));
-    const app = createApp({ ...configFor(sourceRoot), host: bindHost });
+    const app = createApp({ ...configFor(sourceRoot), host: bindHost }, NO_ALIASES);
     try {
       const response = await app.inject({
         method: "GET",

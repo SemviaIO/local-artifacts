@@ -63,4 +63,10 @@ describe("built-in sources", () => {
       ),
     ).toThrow(/Overlapping source prefixes "claude-sessions" and "claude-sessions"/);
   });
+
+  it.each(["s", "s/x"])("reserves the short-link namespace from prefix %s", (prefix) => {
+    expect(() => parseSources([{ prefix, root: "/srv/elsewhere" }])).toThrow(
+      /Overlapping source prefixes/,
+    );
+  });
 });
