@@ -70,7 +70,8 @@ export class AliasTable implements AliasResolver, AliasMinter {
   /**
    * Read the table file and drop each entry whose directory no longer passes
    * the admission check. A missing file is an empty table; a malformed one is
-   * too, with a warning, so a bad file never stops the server.
+   * too, with a warning, so a bad file never stops the server. A file that
+   * exists but cannot be read throws.
    */
   static async load(file: string, sources: SourceConfig[]): Promise<AliasTable> {
     const table = new AliasTable(file, sources);
@@ -115,8 +116,12 @@ export class AliasTable implements AliasResolver, AliasMinter {
     // directory cannot both take an id.
     const existing = this.byDirectory.get(lexical);
     if (existing !== undefined) {
-      // The mint that added it may still be writing the file.
+      // The mint that added it may still be writing the file, and a failed
+      // write takes the entry back out.
       await this.writing;
+      if (this.byDirectory.get(lexical) !== existing) {
+        throw new Error(`Could not save the short link for "${directory}"`);
+      }
       return existing;
     }
 
@@ -130,7 +135,10 @@ export class AliasTable implements AliasResolver, AliasMinter {
     }
     const id = candidates.slice(0, length);
     this.add(id, lexical);
-    await this.persist();
+    await this.persist(() => {
+      this.byId.delete(id);
+      this.byDirectory.delete(lexical);
+    });
     return id;
   }
 
@@ -158,9 +166,11 @@ export class AliasTable implements AliasResolver, AliasMinter {
   /**
    * Write the whole table: to a temp file, then rename over the old one, so a
    * reader never sees half a file. Each write snapshots the table when its
-   * turn comes, so the last write always holds every entry.
+   * turn comes, so the last write always holds every entry. `rollback` runs
+   * on failure before the next write starts, so the table in memory never
+   * holds an entry its own mint reported as failed.
    */
-  private persist(): Promise<void> {
+  private persist(rollback: () => void): Promise<void> {
     const write = this.writing.then(async () => {
       const temp = `${this.file}.${process.pid}.${++this.writeCount}.tmp`;
       await mkdir(path.dirname(this.file), { recursive: true });
@@ -170,6 +180,9 @@ export class AliasTable implements AliasResolver, AliasMinter {
         "utf-8",
       );
       await rename(temp, this.file);
+    }).catch((error: unknown) => {
+      rollback();
+      throw error;
     });
     // A failed write fails its own mint, not the next one.
     this.writing = write.catch(() => {});
@@ -185,8 +198,9 @@ async function readTable(file: string): Promise<Record<string, unknown>> {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       return {};
     }
-    console.warn(`Warning: cannot read short links from ${file}: ${String(error)}`);
-    return {};
+    // Starting empty here would let the next mint overwrite a table that
+    // exists but cannot be read.
+    throw error;
   }
   try {
     const parsed: unknown = JSON.parse(content);

@@ -150,6 +150,28 @@ describe("AliasTable", () => {
     expect(Object.keys(await readEntries(file)).sort()).toEqual([...ids].sort());
   });
 
+  it("rolls back a mint whose write fails, so a retry fails too", async () => {
+    // The table's parent becomes a regular file after load, so every write
+    // fails.
+    const blocker = path.join(parent, "blocker");
+    const table = await AliasTable.load(path.join(blocker, "table.json"), sources);
+    await writeFile(blocker, "");
+
+    const minting = [table.mint(path.join(root, "a")), table.mint(path.join(root, "a"))];
+
+    for (const result of await Promise.allSettled(minting)) {
+      expect(result.status).toBe("rejected");
+    }
+    await expect(table.mint(path.join(root, "a"))).rejects.toThrow();
+  });
+
+  it("refuses to load a table file it cannot read", async () => {
+    const unreadable = path.join(parent, "a-directory");
+    await mkdir(unreadable);
+
+    await expect(AliasTable.load(unreadable, sources)).rejects.toThrow(/EISDIR/);
+  });
+
   it("starts empty from a malformed file", async () => {
     const file = tableFile();
     await mkdir(path.dirname(file), { recursive: true });
