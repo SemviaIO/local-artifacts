@@ -79,12 +79,19 @@ function validatePrefix(prefix: string) {
   }
 }
 
-function validateSourceSet(sourcePrefixes: string[]) {
+function validateSourceSet(prefixes: string[]) {
+  // The short-link namespace overlaps any source that claims it.
+  for (const prefix of prefixes) {
+    if (prefix === ALIAS_NAMESPACE || prefix.startsWith(ALIAS_NAMESPACE + "/")) {
+      throw new Error(
+        `Source prefix "${prefix}" is reserved: /${ALIAS_NAMESPACE}/ serves short links`,
+      );
+    }
+  }
+
   // Reject overlapping prefixes — one cannot be a path-prefix of another.
   // e.g. "plans" + "plans/foo" would produce Fastify route collisions between
   // "/plans/:file" (file under outer) and "/plans/foo/" (listing for inner).
-  // The short-link namespace takes part, so no source can claim it.
-  const prefixes = [...sourcePrefixes, ALIAS_NAMESPACE];
   for (let i = 0; i < prefixes.length; i++) {
     for (let j = i + 1; j < prefixes.length; j++) {
       const [a, b] = [prefixes[i], prefixes[j]];

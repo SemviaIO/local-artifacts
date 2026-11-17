@@ -66,7 +66,7 @@ describe("built-in sources", () => {
 
   it.each(["s", "s/x"])("reserves the short-link namespace from prefix %s", (prefix) => {
     expect(() => parseSources([{ prefix, root: "/srv/elsewhere" }])).toThrow(
-      /Overlapping source prefixes/,
+      /Source prefix "s(\/x)?" is reserved/,
     );
   });
 });
