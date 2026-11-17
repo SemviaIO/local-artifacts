@@ -42,7 +42,7 @@ async function main() {
 
     const body = request.body as Record<string, unknown>;
 
-    const server = createMcpServer(config, renderer);
+    const server = createMcpServer(config, renderer, aliases);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
