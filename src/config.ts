@@ -8,12 +8,12 @@ import type { Config, SourceConfig } from "./types.js";
 
 const VALID_PREFIX = /^[a-z0-9-]+(\/[a-z0-9-]+)*$/;
 
-export const CONFIG_PATH = node_path.join(
-  node_os.homedir(),
-  ".config",
-  "local-artifacts",
-  "config.json",
-);
+const CONFIG_DIR = node_path.join(node_os.homedir(), ".config", "local-artifacts");
+
+export const CONFIG_PATH = node_path.join(CONFIG_DIR, "config.json");
+
+/** The short-link table: one JSON object of id → directory. */
+export const SHORT_LINKS_PATH = node_path.join(CONFIG_DIR, "short-links.json");
 
 const DEFAULT_SOURCES: SourceConfig[] = [
   { prefix: "plans", root: "~/plans" },

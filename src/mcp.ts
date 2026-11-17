@@ -6,37 +6,15 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import type { Config, SourceConfig } from "./types.js";
+import type { Config } from "./types.js";
 import { CLAUDE_SESSIONS_PREFIX } from "./config.js";
-import { isServedFile, listFiles, resolveSafePath } from "./fs.js";
+import {
+  isServedFile,
+  listFiles,
+  resolvePathToSource,
+  resolveSafePath,
+} from "./fs.js";
 import type { Renderer } from "./renderer.js";
-
-/**
- * Reverse-map an absolute filesystem path to a configured source.
- * Returns the matching source and the relative path within it, or undefined
- * if the path doesn't fall within any source directory. Hidden sources are
- * included — `hidden` only controls discovery surfaces, not resolution.
- *
- * Containment rests entirely on the `startsWith` check against the *resolved*
- * path: `path.resolve` has already collapsed every `..` segment, so a real
- * traversal lands outside `sourceDir` and fails it. Screening the relative
- * form for a `..` substring on top of that only ever rejects literal dots in
- * a name (`draft..md`, `a..b/notes.md`) that are provably contained.
- * `resolveSafePath` remains the security boundary, re-checking after realpath.
- */
-function resolvePathToSource(
-  sources: SourceConfig[],
-  absolutePath: string,
-): { source: SourceConfig; relative: string } | undefined {
-  const resolved = path.resolve(absolutePath);
-  for (const source of sources) {
-    const sourceDir = path.resolve(source.root);
-    if (resolved.startsWith(sourceDir + path.sep)) {
-      return { source, relative: path.relative(sourceDir, resolved) };
-    }
-  }
-  return undefined;
-}
 
 /**
  * The MCP layer only ever calls `render`, so it depends on that slice rather
