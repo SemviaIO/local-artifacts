@@ -6,7 +6,8 @@ import { promisify } from "node:util";
 
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import { loadConfig } from "./config.js";
+import { AliasTable } from "./aliases.js";
+import { loadConfig, SHORT_LINKS_PATH } from "./config.js";
 import { createMcpServer } from "./mcp.js";
 import { Renderer } from "./renderer.js";
 import { createApp } from "./server.js";
@@ -26,7 +27,8 @@ const TAILSCALE_BIN_CANDIDATES = [
 
 async function main() {
   const config = await loadConfig();
-  const app = createApp(config);
+  const aliases = await AliasTable.load(SHORT_LINKS_PATH, config.sources);
+  const app = createApp(config, aliases);
 
   // Late-bound renderer — set after listen() so Playwright can reach the server.
   let renderer: Renderer | undefined;
@@ -40,7 +42,7 @@ async function main() {
 
     const body = request.body as Record<string, unknown>;
 
-    const server = createMcpServer(config, renderer);
+    const server = createMcpServer(config, renderer, aliases);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });

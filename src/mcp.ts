@@ -6,37 +6,16 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
+import type { AliasMinter } from "./aliases.js";
 import type { Config, SourceConfig } from "./types.js";
 import { CLAUDE_SESSIONS_PREFIX } from "./config.js";
-import { isServedFile, listFiles, resolveSafePath } from "./fs.js";
+import {
+  isServedFile,
+  listFiles,
+  resolvePathToSource,
+  resolveSafePath,
+} from "./fs.js";
 import type { Renderer } from "./renderer.js";
-
-/**
- * Reverse-map an absolute filesystem path to a configured source.
- * Returns the matching source and the relative path within it, or undefined
- * if the path doesn't fall within any source directory. Hidden sources are
- * included — `hidden` only controls discovery surfaces, not resolution.
- *
- * Containment rests entirely on the `startsWith` check against the *resolved*
- * path: `path.resolve` has already collapsed every `..` segment, so a real
- * traversal lands outside `sourceDir` and fails it. Screening the relative
- * form for a `..` substring on top of that only ever rejects literal dots in
- * a name (`draft..md`, `a..b/notes.md`) that are provably contained.
- * `resolveSafePath` remains the security boundary, re-checking after realpath.
- */
-function resolvePathToSource(
-  sources: SourceConfig[],
-  absolutePath: string,
-): { source: SourceConfig; relative: string } | undefined {
-  const resolved = path.resolve(absolutePath);
-  for (const source of sources) {
-    const sourceDir = path.resolve(source.root);
-    if (resolved.startsWith(sourceDir + path.sep)) {
-      return { source, relative: path.relative(sourceDir, resolved) };
-    }
-  }
-  return undefined;
-}
 
 /**
  * The MCP layer only ever calls `render`, so it depends on that slice rather
@@ -48,6 +27,7 @@ export type ValidatingRenderer = Pick<Renderer, "render">;
 export function createMcpServer(
   config: Config,
   renderer: ValidatingRenderer,
+  aliases: AliasMinter,
 ): Server {
   const baseUrl = `http://${config.host}:${config.port}`;
 
@@ -73,7 +53,7 @@ export function createMcpServer(
 
   const instructions = [
     "local-artifacts is a local preview host. It serves Markdown (Mermaid diagrams rendered and validated) and HTML pages (mockups, designs, reports, Claude Code Artifact pages) to a browser, with live reload. Multi-file HTML works: CSS, JS, images, fonts and JSON beside the page are served too, and a fragment page with no doctype is wrapped into standards mode, as claude.ai does at publish time.",
-    "Workflow: write the file to disk, then call `preview` with its absolute path and open or share the URL it returns. Editing the file reloads the open page; for HTML, so does editing anything in its directory.",
+    "Workflow: write the file to disk, then call `preview` with its absolute path and open or share the `url` it returns. `url` is a short link to the file's directory; `fullUrl` is the same page at its full path. Editing the file reloads the open page; for HTML, so does editing anything in its directory.",
     `Previewable directories: ${sourceListDescription()}.` +
       (sessionsRoot === undefined
         ? ""
@@ -102,7 +82,7 @@ export function createMcpServer(
       {
         name: "preview",
         description:
-          `Preview a local Markdown, Mermaid, or HTML file (mockups, designs, reports, Claude Code Artifact pages) in the browser: returns its viewer URL, which live-reloads on edit. HTML (.html) returns immediately; its sibling CSS, JS, images and fonts are served, and a fragment with no doctype is wrapped into standards mode. Markdown (.md) is rendered first and its Mermaid diagrams validated — on failure you get an error with details instead of a URL, so fix the file and call again. Directories: ${sourceListDescription()}${sessionsRoot === undefined ? "" : `, and Claude Code session scratchpads under ${sessionsRoot}`}. Viewer: ${viewerUrl()}`,
+          `Preview a local Markdown, Mermaid, or HTML file (mockups, designs, reports, Claude Code Artifact pages) in the browser: returns "url", a short viewer link, and "fullUrl", the same page at its full path; both live-reload on edit. HTML (.html) returns immediately; its sibling CSS, JS, images and fonts are served, and a fragment with no doctype is wrapped into standards mode. Markdown (.md) is rendered first and its Mermaid diagrams validated — on failure you get an error with details instead of a URL, so fix the file and call again. Directories: ${sourceListDescription()}${sessionsRoot === undefined ? "" : `, and Claude Code session scratchpads under ${sessionsRoot}`}. Viewer: ${viewerUrl()}`,
         inputSchema: {
           type: "object" as const,
           properties: {
@@ -177,7 +157,7 @@ export function createMcpServer(
         const viewName = isMarkdown
           ? match.relative.slice(0, -3)
           : match.relative;
-        const url = `${viewerUrl()}/${match.source.prefix}/${viewName}`;
+        const fullUrl = `${viewerUrl()}/${match.source.prefix}/${viewName}`;
 
         // Only markdown is rendered and validated. Hosted HTML has no
         // viewer shell and so no `[data-render-status]` sentinel for the
@@ -206,9 +186,23 @@ export function createMcpServer(
           }
         }
 
+        // The short link names the file's directory, so every file in one
+        // directory shares an id. Minted only here, once the file has passed
+        // validation.
+        let short: SourceConfig;
+        try {
+          short = await aliases.mint(path.dirname(path.resolve(filePath)));
+        } catch (e) {
+          return {
+            content: [{ type: "text", text: `Could not create a short link: ${(e as Error).message}` }],
+            isError: true,
+          };
+        }
+        const url = `${viewerUrl()}/${short.prefix}/${path.basename(viewName)}`;
+
         // One success shape for both formats, so callers parse one thing.
         return {
-          content: [{ type: "text", text: JSON.stringify({ status: "ok", url }) }],
+          content: [{ type: "text", text: JSON.stringify({ status: "ok", url, fullUrl }) }],
         };
       }
 

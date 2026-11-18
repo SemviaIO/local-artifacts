@@ -1,16 +1,16 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 
 import { listFiles, readSourceFile } from "../fs.js";
-import type { SourceConfig } from "../types.js";
-import { sendFsError } from "./errors.js";
+import type { SourceConfig, SourceRoute } from "../types.js";
+import { sendFsError, sendUnknownSource } from "./errors.js";
 
 /**
- * Owns the entire `/api/${prefix}/...` URL space for each configured
- * source.
+ * Owns the entire `/api/${pattern}/...` URL space for each source route:
+ * each configured source, and the short-link namespace.
  *
- * Two routes per source:
- *   /api/${prefix}/    — source-root listing
- *   /api/${prefix}/*   — catch-all dispatching by suffix:
+ * Two routes per source route:
+ *   /api/${pattern}/    — source-root listing
+ *   /api/${pattern}/*   — catch-all dispatching by suffix:
  *                          trailing slash → sub-directory listing
  *                          .md            → raw markdown
  *                          .html          → raw HTML
@@ -22,16 +22,23 @@ import { sendFsError } from "./errors.js";
  */
 export function registerApiRoutes(
   app: FastifyInstance,
-  sources: SourceConfig[],
+  routes: SourceRoute[],
 ): void {
-  for (const source of sources) {
-    app.get(`/api/${source.prefix}/`, async (_request, reply) => {
-      return sendListing(reply, source, "");
-    });
-
-    app.get<{ Params: { "*": string } }>(
-      `/api/${source.prefix}/*`,
+  for (const route of routes) {
+    app.get<{ Params: Record<string, string> }>(
+      `/api${route.pattern}/`,
       async (request, reply) => {
+        const source = route.lookup(request.params);
+        if (source === undefined) return sendUnknownSource(reply);
+        return sendListing(reply, source, "");
+      },
+    );
+
+    app.get<{ Params: Record<string, string> }>(
+      `/api${route.pattern}/*`,
+      async (request, reply) => {
+        const source = route.lookup(request.params);
+        if (source === undefined) return sendUnknownSource(reply);
         const captured = request.params["*"];
 
         if (captured.endsWith("/")) {

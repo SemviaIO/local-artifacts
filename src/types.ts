@@ -35,6 +35,18 @@ export interface SourceConfig {
   hidden?: boolean;
 }
 
+/**
+ * Where a set of source routes is mounted, and how a request finds the
+ * source it reads. A configured source mounts at `/<prefix>` and always finds
+ * itself; short links mount once at `/s/:id` and look the id up, so a link
+ * minted after startup serves with no new route.
+ */
+export interface SourceRoute {
+  /** URL pattern of the source root, with no trailing slash, e.g. `/plans`. */
+  pattern: string;
+  lookup: (params: Record<string, string>) => SourceConfig | undefined;
+}
+
 export interface Config {
   sources: SourceConfig[];
   port: number;

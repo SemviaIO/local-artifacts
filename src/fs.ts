@@ -2,7 +2,7 @@ import { readdir, readFile, stat, realpath } from "node:fs/promises";
 import { watch, type FSWatcher } from "node:fs";
 import path from "node:path";
 
-import type { FileEntry } from "./types.js";
+import type { FileEntry, SourceConfig } from "./types.js";
 
 /**
  * Discovery filter applied to directory listings. Anything in this set is
@@ -105,6 +105,34 @@ export async function resolveSafePath(
   }
 
   return realResolved;
+}
+
+/**
+ * Reverse-map an absolute filesystem path to a configured source.
+ * Returns the matching source and the relative path within it, or undefined
+ * if the path doesn't fall within any source directory. A path equal to a
+ * source root matches with an empty relative path. Hidden sources are
+ * included — `hidden` only controls discovery surfaces, not resolution.
+ *
+ * Containment rests entirely on the `startsWith` check against the *resolved*
+ * path: `path.resolve` has already collapsed every `..` segment, so a real
+ * traversal lands outside `sourceDir` and fails it. Screening the relative
+ * form for a `..` substring on top of that only ever rejects literal dots in
+ * a name (`draft..md`, `a..b/notes.md`) that are provably contained.
+ * `resolveSafePath` remains the security boundary, re-checking after realpath.
+ */
+export function resolvePathToSource(
+  sources: SourceConfig[],
+  absolutePath: string,
+): { source: SourceConfig; relative: string } | undefined {
+  const resolved = path.resolve(absolutePath);
+  for (const source of sources) {
+    const sourceDir = path.resolve(source.root);
+    if (resolved === sourceDir || resolved.startsWith(sourceDir + path.sep)) {
+      return { source, relative: path.relative(sourceDir, resolved) };
+    }
+  }
+  return undefined;
 }
 
 /**

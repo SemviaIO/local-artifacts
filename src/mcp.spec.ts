@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { AliasTable } from "./aliases.js";
 import { CLAUDE_SESSIONS_ROOT, withBuiltinSources } from "./config.js";
 import { createMcpServer, type ValidatingRenderer } from "./mcp.js";
 import type { RenderResult } from "./renderer.js";
@@ -42,8 +43,21 @@ function textOf(result: Record<string, unknown>): string {
   return first.text;
 }
 
-async function connect(config: Config, renderer: StubRenderer): Promise<Client> {
-  const server = createMcpServer(config, renderer);
+/** A short link to a file in an aliased directory: `<viewer>/s/<id>/<name>`. */
+const SHORT_URL = /^http:\/\/127\.0\.0\.1:3333\/s\/([0-9a-hjkmnp-tv-z]{8})\/([^/]+)$/;
+
+function parseShortUrl(url: string): { id: string; name: string } {
+  const match = SHORT_URL.exec(url);
+  if (!match) throw new Error(`not a short link: ${url}`);
+  return { id: match[1], name: match[2] };
+}
+
+async function connect(
+  config: Config,
+  renderer: StubRenderer,
+  aliases: AliasTable,
+): Promise<Client> {
+  const server = createMcpServer(config, renderer, aliases);
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "spec", version: "0.0.0" });
@@ -59,6 +73,10 @@ describe("mcp preview", () => {
   let renderer: StubRenderer;
   let client: Client;
   let config: Config;
+  let tableDir: string;
+  let tableFile: string;
+  let aliases: AliasTable;
+  let tables = 0;
 
   beforeAll(async () => {
     sourceRoot = await mkdtemp(path.join(os.tmpdir(), "local-artifacts-mcp-"));
@@ -70,6 +88,8 @@ describe("mcp preview", () => {
     await mkdir(path.join(sourceRoot, "a..b"));
     await writeFile(path.join(sourceRoot, "a..b", "notes.md"), "# hi\n");
 
+    tableDir = await mkdtemp(path.join(os.tmpdir(), "local-artifacts-mcp-table-"));
+
     config = {
       sources: [{ prefix: "plans", root: sourceRoot }],
       port: 3333,
@@ -80,38 +100,58 @@ describe("mcp preview", () => {
 
   afterAll(async () => {
     await rm(sourceRoot, { recursive: true, force: true });
+    await rm(tableDir, { recursive: true, force: true });
   });
 
   beforeEach(async () => {
     renderer = new StubRenderer();
-    client = await connect(config, renderer);
+    tableFile = path.join(tableDir, `${++tables}.json`);
+    aliases = await AliasTable.load(tableFile, config.sources);
+    client = await connect(config, renderer, aliases);
   });
 
-  it("returns a URL for a hosted .html file without invoking the renderer", async () => {
-    const result = await client.callTool({
-      name: "preview",
-      arguments: { path: path.join(sourceRoot, "page.html") },
-    });
-
+  /** The parsed success object of a `preview` call. */
+  async function previewOk(file: string): Promise<{ status: string; url: string; fullUrl: string }> {
+    const result = await client.callTool({ name: "preview", arguments: { path: file } });
     expect(result.isError).toBeFalsy();
-    expect(JSON.parse(textOf(result))).toEqual({
+    return JSON.parse(textOf(result)) as { status: string; url: string; fullUrl: string };
+  }
+
+  it("returns a URL for a hosted .html file without invoking the renderer", async () => {
+    const body = await previewOk(path.join(sourceRoot, "page.html"));
+
+    expect(body).toEqual({
       status: "ok",
-      url: "http://127.0.0.1:3333/plans/page.html",
+      url: expect.stringMatching(SHORT_URL),
+      fullUrl: "http://127.0.0.1:3333/plans/page.html",
     });
+    expect(parseShortUrl(body.url).name).toBe("page.html");
     expect(renderer.calls).toEqual([]);
   });
 
-  it("still renders and validates a .md file, returning its extensionless URL", async () => {
-    const result = await client.callTool({
-      name: "preview",
-      arguments: { path: path.join(sourceRoot, "doc.md") },
-    });
+  it("short-links the directory that holds the file", async () => {
+    const { id } = parseShortUrl((await previewOk(path.join(sourceRoot, "page.html"))).url);
 
-    expect(result.isError).toBeFalsy();
-    expect(JSON.parse(textOf(result))).toEqual({
+    expect(aliases.resolve(id)?.root).toBe(sourceRoot);
+  });
+
+  it("gives two files in one directory the same id", async () => {
+    const page = parseShortUrl((await previewOk(path.join(sourceRoot, "page.html"))).url);
+    const doc = parseShortUrl((await previewOk(path.join(sourceRoot, "doc.md"))).url);
+
+    expect(doc.id).toBe(page.id);
+    expect(doc.name).toBe("doc");
+  });
+
+  it("still renders and validates a .md file, returning its extensionless URL", async () => {
+    const body = await previewOk(path.join(sourceRoot, "doc.md"));
+
+    expect(body).toEqual({
       status: "ok",
-      url: "http://127.0.0.1:3333/plans/doc",
+      url: expect.stringMatching(SHORT_URL),
+      fullUrl: "http://127.0.0.1:3333/plans/doc",
     });
+    expect(parseShortUrl(body.url).name).toBe("doc");
     expect(renderer.calls).toEqual([
       {
         sourceName: "plans",
@@ -135,6 +175,8 @@ describe("mcp preview", () => {
 
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("Parse error on line 2");
+    // Nothing was minted, so nothing was written.
+    await expect(access(tableFile)).rejects.toThrow(/ENOENT/);
   });
 
   it("rejects an extension that cannot be previewed", async () => {
@@ -167,16 +209,12 @@ describe("mcp preview", () => {
     // `path.resolve` has already collapsed real traversals by the time
     // containment is checked, so `a..b/` is a plain directory — it must not
     // be mistaken for an escape attempt.
-    const result = await client.callTool({
-      name: "preview",
-      arguments: { path: path.join(sourceRoot, "a..b", "notes.md") },
-    });
+    const body = await previewOk(path.join(sourceRoot, "a..b", "notes.md"));
 
-    expect(result.isError).toBeFalsy();
-    expect(JSON.parse(textOf(result))).toEqual({
-      status: "ok",
-      url: "http://127.0.0.1:3333/plans/a..b/notes",
-    });
+    expect(body.fullUrl).toBe("http://127.0.0.1:3333/plans/a..b/notes");
+    const { id, name } = parseShortUrl(body.url);
+    expect(name).toBe("notes");
+    expect(aliases.resolve(id)?.root).toBe(path.join(sourceRoot, "a..b"));
   });
 
   it("reports a missing file rather than handing back a URL", async () => {
@@ -260,6 +298,7 @@ describe("mcp preview", () => {
     const withSessions = await connect(
       { ...config, sources: withBuiltinSources(config.sources) },
       renderer,
+      aliases,
     );
 
     expect(withSessions.getInstructions()).toContain(CLAUDE_SESSIONS_ROOT);

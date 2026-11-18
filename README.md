@@ -82,7 +82,7 @@ Each source is an object with a URL `prefix` and a filesystem `root`, matching `
 - `root` — filesystem directory. Supports `~` expansion to the home directory. Created automatically if it does not exist.
 - `hidden` — optional boolean (default `false`). When `true`, the source is served normally but omitted from MCP tool descriptions, `list_paths`, and the browser root index (the built-in `claude-sessions` source is still named in the MCP text). Use for fallback directories you want available by absolute-path lookup without advertising them.
 
-Two sources cannot have overlapping prefixes (e.g. `plans` and `plans/foo` would collide) — the server exits at boot with a clear error if this happens.
+Two sources cannot have overlapping prefixes (e.g. `plans` and `plans/foo` would collide) — the server exits at boot with a clear error if this happens. The prefix `s` (and anything under it) is reserved for short links.
 
 Default sources when no config file is present:
 
@@ -134,10 +134,16 @@ The server also sends MCP `instructions` describing it as a local preview host f
 
 | Tool | Input | Returns |
 |------|-------|---------|
-| `preview` | `path`: absolute path to a `.md` or `.html` file under a source | `{"status": "ok", "url": "..."}`. For `.md`, Mermaid diagrams are validated first; a parse failure returns the errors instead of a URL. `.html` returns immediately. |
+| `preview` | `path`: absolute path to a `.md` or `.html` file under a source | `{"status": "ok", "url": "...", "fullUrl": "..."}`. `url` is a short link, `/s/<id>/<name>`; `fullUrl` is the same page at its full path. For `.md`, Mermaid diagrams are validated first; a parse failure returns the errors instead of a URL. `.html` returns immediately. |
 | `list_paths` | none | The `.md` and `.html` files at the top level of each visible source, as absolute paths grouped by directory. |
 
 Both tools are read-only. Hidden sources resolve through `preview` but are left out of `list_paths` and the tool descriptions, except the built-in `claude-sessions` root, which the instructions and the `preview` description name so agents know their scratchpad is previewable.
+
+### Short links
+
+A short link is an alias for a directory: `/s/<id>/<rest>` serves what `/<source>/<directory>/<rest>` serves, with the same viewer, sibling assets, listings and live reload. `preview` mints one for the directory that holds the file, so every file in one directory shares an id. The id is the first eight characters of the lowercase Crockford base32 SHA-256 of the directory's absolute path, so the same directory always gets the same link; if two directories collide, the later id grows by one character.
+
+The table lives in `~/.config/local-artifacts/short-links.json` and survives a restart. On start the server drops each entry whose directory is gone or is no longer inside a configured source. A short link reaches only its own directory, so a page that links to `../other` works at its full path but not at its short link.
 
 ### Previewing Claude Code Artifact pages
 
@@ -169,6 +175,8 @@ the `--host` it binds to, and the tailnet hostname once Tailscale is set up. Any
 header gets a 403 before a route runs. This blocks DNS rebinding, where a web page points its
 own hostname at `127.0.0.1` to read your files and the MCP endpoint as same-origin.
 
+A short link is jailed to its own directory, which is inside a configured source, so it reaches less than the full path does.
+
 A non-loopback `--host` must be the exact hostname clients put in the URL. Binding a wildcard
 address (`0.0.0.0`, `::`) leaves LAN clients, which address the server by an interface IP,
 with a 403.
@@ -192,6 +200,9 @@ with a 403.
 /events/:source/foo.md         SSE stream (emits on file change)
 /events/:source/sub/foo.md     SSE stream for a nested file
 /events/:source/page.html      SSE stream (emits on any change in the page's directory tree)
+/s/:id/...                     Short link: as /:source/... for the aliased directory
+/api/s/:id/...                 As /api/:source/... for the aliased directory
+/events/s/:id/...              As /events/:source/... for the aliased directory
 ```
 
 `:source` may itself be a multi-segment prefix (e.g. `claude/plans`), in which case the URLs include each segment — `/claude/plans/foo`, `/api/claude/plans/foo.md`, etc.

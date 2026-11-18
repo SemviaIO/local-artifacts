@@ -8,12 +8,12 @@ import type { Config, SourceConfig } from "./types.js";
 
 const VALID_PREFIX = /^[a-z0-9-]+(\/[a-z0-9-]+)*$/;
 
-export const CONFIG_PATH = node_path.join(
-  node_os.homedir(),
-  ".config",
-  "local-artifacts",
-  "config.json",
-);
+const CONFIG_DIR = node_path.join(node_os.homedir(), ".config", "local-artifacts");
+
+export const CONFIG_PATH = node_path.join(CONFIG_DIR, "config.json");
+
+/** The short-link table: one JSON object of id → directory. */
+export const SHORT_LINKS_PATH = node_path.join(CONFIG_DIR, "short-links.json");
 
 const DEFAULT_SOURCES: SourceConfig[] = [
   { prefix: "plans", root: "~/plans" },
@@ -34,6 +34,9 @@ export const CLAUDE_SESSIONS_ROOT = node_path.join(
 );
 
 export const CLAUDE_SESSIONS_PREFIX = "claude-sessions";
+
+/** URL segment that holds every short link: `/s/<id>/<rest>`. */
+export const ALIAS_NAMESPACE = "s";
 
 /**
  * Always served, whatever the config file says: a config that sets
@@ -79,6 +82,15 @@ function validatePrefix(prefix: string) {
 }
 
 function validateSourceSet(prefixes: string[]) {
+  // The short-link namespace overlaps any source that claims it.
+  for (const prefix of prefixes) {
+    if (prefix === ALIAS_NAMESPACE || prefix.startsWith(ALIAS_NAMESPACE + "/")) {
+      throw new Error(
+        `Source prefix "${prefix}" is reserved: /${ALIAS_NAMESPACE}/ serves short links`,
+      );
+    }
+  }
+
   // Reject overlapping prefixes — one cannot be a path-prefix of another.
   // e.g. "plans" + "plans/foo" would produce Fastify route collisions between
   // "/plans/:file" (file under outer) and "/plans/foo/" (listing for inner).
